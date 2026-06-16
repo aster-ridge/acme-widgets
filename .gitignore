@@ -1,7 +1,6 @@
 .DS_Store
+Thumbs.db
 *.log
 .env
 .env.*
-node_modules/
-dist/
-build/
+!.env.example

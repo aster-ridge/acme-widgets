@@ -1,18 +1,17 @@
-# Acme Widgets — stock site
+# Acme Widgets
 
-A minimal static website used as the starting point for the AutoCTO live demo.
-It's intentionally plain: just `index.html` and `styles.css`. **No** infrastructure,
-**no** GitHub Actions, **no** deploy pipeline — yet.
+Static marketing site for **Aster Ridge Labs** pipeline demos.
 
-When AutoCTO runs against this repo, it adds:
+This repo intentionally ships as a **greenfield static site** — `index.html` and `styles.css` only — with **no** Dockerfile, `.dockerignore`, or GitHub Actions workflows yet. That is the starting point for the Infranitum pipeline wizard:
 
-- CloudFormation templates for an S3 + CloudFront deploy
-- A GitHub Action that publishes the site on push to `main`
-- Security and compliance scaffolding (least-privilege IAM, OIDC, etc.)
-
-The point of the demo is to see those additions land as PRs against an
-otherwise untouched website.
+1. Install the Infranitum GitHub App on `aster-ridge/acme-widgets`
+2. Run the container readiness scan (expects gaps)
+3. Open a pull request that adds Docker scaffolding, CloudFormation, and a secure CI/CD workflow
 
 ## Run locally
 
-Open `index.html` in a browser. That's it.
+Open `index.html` in a browser.
+
+## About
+
+Based on [DavidITScripts/autocto-stock-website](https://github.com/DavidITScripts/autocto-stock-website).
