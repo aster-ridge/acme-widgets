@@ -1,0 +1,128 @@
+:root {
+  --bg: #faf8f4;
+  --ink: #1c1a16;
+  --muted: #6c655a;
+  --accent: #b8542a;
+  --card: #ffffff;
+  --border: #e8e2d6;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 40px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 18px;
+}
+
+.nav nav a {
+  color: var(--ink);
+  text-decoration: none;
+  margin-left: 24px;
+  font-size: 15px;
+}
+
+.nav nav a:hover { color: var(--accent); }
+
+main { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+.hero {
+  padding: 96px 0 64px;
+  text-align: center;
+}
+
+.hero h1 {
+  font-size: 48px;
+  line-height: 1.1;
+  margin: 0 0 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.hero p {
+  font-size: 19px;
+  color: var(--muted);
+  margin: 0 0 32px;
+}
+
+.cta {
+  display: inline-block;
+  background: var(--accent);
+  color: white;
+  padding: 12px 24px;
+  border-radius: 4px;
+  text-decoration: none;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cta:hover { opacity: 0.92; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  padding: 48px 0;
+}
+
+@media (max-width: 720px) {
+  .grid { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 36px; }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 28px 24px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+
+.card p {
+  color: var(--muted);
+  margin: 0 0 18px;
+}
+
+.price {
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--accent);
+}
+
+.about, .contact {
+  padding: 48px 0;
+  border-top: 1px solid var(--border);
+}
+
+.about h2, .contact h2 {
+  font-size: 28px;
+  margin: 0 0 12px;
+}
+
+footer {
+  padding: 32px 24px 48px;
+  text-align: center;
+  color: var(--muted);
+}
