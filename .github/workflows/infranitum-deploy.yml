@@ -17,8 +17,6 @@ on:
       - main
     paths:
       - 'infra/infranitum/**'
-    paths-ignore:
-      - 'infra/infranitum/_bootstrap/**'
   workflow_dispatch: {}
 
 permissions:
