@@ -1,0 +1,110 @@
+# Infranitum deploy workflow.
+#
+# Triggers on merges to main that touch CloudFormation under `infra/infranitum/`.
+# Assumes the `InfranitumDeployRole` in your AWS account via GitHub OIDC (no
+# long-lived AWS keys live in GitHub). For each template found, runs
+# `aws cloudformation deploy` and tags the resulting stack `ManagedBy=Infranitum`.
+#
+# Configure once via repo variables (Settings → Secrets and variables → Actions):
+#
+#   INFRANITUM_DEPLOY_ROLE_ARN    The Role ARN output by the Infranitum bootstrap
+#                              CloudFormation stack (paste the value into
+#                              Infranitum → Config → Deploy pipeline too).
+#   INFRANITUM_AWS_REGION         Region to deploy into. Optional; defaults to
+#                              us-east-1 if unset.
+
+name: Infranitum Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/infranitum/**'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.INFRANITUM_AWS_REGION || 'us-east-1' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Assume Infranitum deploy role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.INFRANITUM_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: infranitum-deploy-${{ github.run_id }}
+
+      - name: Discover Infranitum templates
+        id: find
+        run: |
+          set -euo pipefail
+          mapfile -t TEMPLATES < <(find infra/infranitum -type f \( -name '*.yaml' -o -name '*.yml' \) ! -path '*/_bootstrap/*' | sort)
+          if [ "${#TEMPLATES[@]}" -eq 0 ]; then
+            echo "::warning::No Infranitum templates under infra/infranitum/ (excluding _bootstrap). Nothing to deploy."
+            echo "templates=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf "Found %d template(s):\n" "${#TEMPLATES[@]}"
+          for t in "${TEMPLATES[@]}"; do echo "  $t"; done
+          {
+            echo "templates<<EOF"
+            for t in "${TEMPLATES[@]}"; do echo "$t"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate every template
+        if: steps.find.outputs.templates != ''
+        run: |
+          set -euo pipefail
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            echo "::group::cfn validate-template — $t"
+            aws cloudformation validate-template --template-body "file://$t" >/dev/null
+            echo "::endgroup::"
+          done <<< "${{ steps.find.outputs.templates }}"
+
+      - name: Deploy each template
+        if: steps.find.outputs.templates != ''
+        run: |
+          set -euo pipefail
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            check_dir="$(basename "$(dirname "$t")")"
+            stack="infranitum-$(echo "$check_dir" | tr '[:upper:]' '[:lower:]')"
+            echo "::group::Deploy $t → $stack"
+            aws cloudformation deploy \
+              --template-file "$t" \
+              --stack-name "$stack" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changeset \
+              --tags ManagedBy=Infranitum "infranitum:check-id=$check_dir" "infranitum:source=github-actions" "infranitum:run-id=${{ github.run_id }}"
+            echo "::endgroup::"
+          done <<< "${{ steps.find.outputs.templates }}"
+
+      - name: Write run summary
+        if: always() && steps.find.outputs.templates != ''
+        run: |
+          {
+            echo "## Infranitum deploy summary"
+            echo
+            echo "Region: \`$AWS_REGION\`"
+            echo "Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo
+            echo "Templates deployed:"
+            while IFS= read -r t; do
+              [ -z "$t" ] && continue
+              check_dir="$(basename "$(dirname "$t")")"
+              stack="infranitum-$(echo "$check_dir" | tr '[:upper:]' '[:lower:]')"
+              echo "- \`$t\` → \`$stack\`"
+            done <<< "${{ steps.find.outputs.templates }}"
+          } >> "$GITHUB_STEP_SUMMARY"
