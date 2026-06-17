@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Infranitum deploy pipeline bootstrap — creates a GitHub Actions OIDC identity
-  provider (if absent) and an IAM role that GitHub Actions in the configured
-  repository can assume via OIDC to deploy Infranitum-generated CloudFormation.
+  Infranitum bootstrap — creates the cross-account read role (InfranitumReadonlyAccess),
+  a GitHub Actions OIDC identity provider (if absent), and an IAM deploy role that
+  GitHub Actions in the configured repository can assume via OIDC to deploy
+  Infranitum-generated CloudFormation.
 
   Trust is scoped to the specified repo + branch. The role is permitted to
   manage stacks named `infranitum-*` and the specific write actions needed to
@@ -44,6 +45,21 @@ Parameters:
       no other branches / PRs / tags can deploy.
     Default: main
 
+  InfranitumAccountId:
+    Type: String
+    AllowedPattern: "^\\d{12}$"
+    Description: >-
+      The AWS account Infranitum's service runs in. Pre-filled in the bootstrap
+      PR deploy command — do not edit unless Infranitum support tells you to.
+
+  ExternalId:
+    Type: String
+    MinLength: 16
+    MaxLength: 128
+    Description: >-
+      Per-workspace secret. Infranitum passes this in every sts:AssumeRole call
+      against the read role. Pre-filled in the bootstrap PR deploy command.
+
   CreateOidcProvider:
     Type: String
     AllowedValues: ['true', 'false']
@@ -58,6 +74,31 @@ Conditions:
   ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
 
 Resources:
+  InfranitumReadonlyAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: InfranitumReadonlyAccess
+      Description: Cross-account role assumed by Infranitum to read posture state.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${InfranitumAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecurityAudit
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Tags:
+        - Key: ManagedBy
+          Value: Infranitum
+        - Key: infranitum:role
+          Value: readonly-evaluator
+
   GitHubOIDCProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: ShouldCreateOidcProvider
@@ -356,6 +397,12 @@ Resources:
           Value: deploy-pipeline
 
 Outputs:
+  ReadRoleArn:
+    Description: ARN of the read-only role Infranitum assumes for posture / findings.
+    Value: !GetAtt InfranitumReadonlyAccessRole.Arn
+    Export:
+      Name: Infranitum-ReadRoleArn
+
   DeployRoleArn:
     Description: >-
       The role GitHub Actions assumes to deploy Infranitum templates.
