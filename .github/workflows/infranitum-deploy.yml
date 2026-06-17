@@ -1,17 +1,13 @@
 # Infranitum deploy workflow.
 #
-# Triggers on merges to main that touch CloudFormation under `infra/infranitum/`.
-# Assumes the `InfranitumDeployRole` in your AWS account via GitHub OIDC (no
-# long-lived AWS keys live in GitHub). For each template found, runs
-# `aws cloudformation deploy` and tags the resulting stack `ManagedBy=Infranitum`.
+# Triggers on merges to main that touch remediation CloudFormation under
+# `infra/infranitum/` (not `_bootstrap/` — bootstrap is deployed manually once).
+# Assumes `InfranitumDeployRole` via GitHub OIDC. For each template found, runs
+# `aws cloudformation deploy` and tags the stack `ManagedBy=Infranitum`.
 #
-# Configure once via repo variables (Settings → Secrets and variables → Actions):
-#
-#   INFRANITUM_DEPLOY_ROLE_ARN    The Role ARN output by the Infranitum bootstrap
-#                              CloudFormation stack (paste the value into
-#                              Infranitum → Config → Deploy pipeline too).
-#   INFRANITUM_AWS_REGION         Region to deploy into. Optional; defaults to
-#                              us-east-1 if unset.
+# Configure AFTER the bootstrap stack deploys (Settings → Variables):
+#   INFRANITUM_DEPLOY_ROLE_ARN — DeployRoleArn from the bootstrap stack
+#   INFRANITUM_AWS_REGION        — optional, default us-east-1
 
 name: Infranitum Deploy
 
@@ -21,6 +17,8 @@ on:
       - main
     paths:
       - 'infra/infranitum/**'
+    paths-ignore:
+      - 'infra/infranitum/_bootstrap/**'
   workflow_dispatch: {}
 
 permissions:
@@ -32,17 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ vars.INFRANITUM_AWS_REGION || 'us-east-1' }}
+      DEPLOY_ROLE_ARN: ${{ vars.INFRANITUM_DEPLOY_ROLE_ARN }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Assume Infranitum deploy role via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.INFRANITUM_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: infranitum-deploy-${{ github.run_id }}
 
       - name: Discover Infranitum templates
         id: find
@@ -50,7 +42,7 @@ jobs:
           set -euo pipefail
           mapfile -t TEMPLATES < <(find infra/infranitum -type f \( -name '*.yaml' -o -name '*.yml' \) ! -path '*/_bootstrap/*' | sort)
           if [ "${#TEMPLATES[@]}" -eq 0 ]; then
-            echo "::warning::No Infranitum templates under infra/infranitum/ (excluding _bootstrap). Nothing to deploy."
+            echo "::notice::No remediation templates under infra/infranitum/ (excluding _bootstrap). Nothing to deploy."
             echo "templates=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -61,6 +53,32 @@ jobs:
             for t in "${TEMPLATES[@]}"; do echo "$t"; done
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Require deploy role variable
+        if: steps.find.outputs.templates != ''
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_ROLE_ARN" ]; then
+            echo "::error::INFRANITUM_DEPLOY_ROLE_ARN is not set."
+            echo ""
+            echo "This workflow assumes InfranitumDeployRole via OIDC. Set it up in order:"
+            echo "  1. Merge the bootstrap PR and deploy the bootstrap CloudFormation stack once"
+            echo "     (aws cloudformation deploy — from your laptop with AWS CLI credentials)."
+            echo "  2. Copy the stack output DeployRoleArn."
+            echo "  3. Repo → Settings → Secrets and variables → Actions → Variables:"
+            echo "       INFRANITUM_DEPLOY_ROLE_ARN = <DeployRoleArn>"
+            echo "       INFRANITUM_AWS_REGION = us-east-1  (optional)"
+            echo "  4. Re-run this workflow or merge a remediation PR."
+            exit 1
+          fi
+
+      - name: Assume Infranitum deploy role via OIDC
+        if: steps.find.outputs.templates != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.INFRANITUM_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: infranitum-deploy-${{ github.run_id }}
 
       - name: Validate every template
         if: steps.find.outputs.templates != ''
@@ -82,6 +100,12 @@ jobs:
             check_dir="$(basename "$(dirname "$t")")"
             stack="infranitum-$(echo "$check_dir" | tr '[:upper:]' '[:lower:]')"
             echo "::group::Deploy $t → $stack"
+            status=$(aws cloudformation describe-stacks --stack-name "$stack" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "MISSING")
+            if [ "$status" = "ROLLBACK_COMPLETE" ]; then
+              echo "Stack is ROLLBACK_COMPLETE (empty); deleting so a fresh CREATE can run."
+              aws cloudformation delete-stack --stack-name "$stack"
+              aws cloudformation wait stack-delete-complete --stack-name "$stack"
+            fi
             aws cloudformation deploy \
               --template-file "$t" \
               --stack-name "$stack" \
