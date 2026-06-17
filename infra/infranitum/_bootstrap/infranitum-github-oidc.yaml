@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Infranitum deploy pipeline bootstrap — creates a GitHub Actions OIDC identity
+  provider (if absent) and an IAM role that GitHub Actions in the configured
+  repository can assume via OIDC to deploy Infranitum-generated CloudFormation.
+
+  Trust is scoped to the specified repo + branch. The role is permitted to
+  manage stacks named `infranitum-*` and the specific write actions needed to
+  apply the 29 bundled remediation templates. No long-lived AWS keys are
+  stored in GitHub.
+
+  After this stack succeeds:
+    1. Copy the `DeployRoleArn` output.
+    2. Paste it into Infranitum → Config → Deploy pipeline.
+    3. Merge the Infranitum bootstrap PR (which adds the workflow file under
+       `.github/workflows/`).
+    4. From then on, merged PRs that drop CFN under `infra/infranitum/**`
+       auto-deploy.
+
+  Source of truth for the permission list: lib/aws-permissions-deploy.ts
+  in the Infranitum codebase. Keep the IAM action list in sync with that file
+  (a unit test fails if they drift).
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: >-
+      GitHub organization or user that owns the IaC repository
+      (e.g. `acme-co` from `https://github.com/acme-co/infra-repo`).
+    AllowedPattern: '^[a-zA-Z0-9](-?[a-zA-Z0-9])*$'
+    MinLength: 1
+    MaxLength: 39
+
+  GitHubRepo:
+    Type: String
+    Description: Repository name only — no owner prefix (e.g. `infra-repo`).
+    AllowedPattern: '^[a-zA-Z0-9._-]{1,100}$'
+
+  AllowedBranch:
+    Type: String
+    Description: >-
+      Branch that's allowed to assume the deploy role.
+      Trust is scoped to `repo:{Org}/{Repo}:ref:refs/heads/{Branch}` —
+      no other branches / PRs / tags can deploy.
+    Default: main
+
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >-
+      Set to `false` if you already have a GitHub Actions OIDC provider
+      in this account (only one per account is allowed). When `false`,
+      this stack only creates the deploy role and reuses the existing
+      provider at `arn:aws:iam::{account}:oidc-provider/token.actions.githubusercontent.com`.
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # ThumbprintList is required by the resource type, but AWS performs
+      # additional validation against the live JWKS — i.e. these values
+      # don't fully govern trust; the audience + sub claim conditions do.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+      Tags:
+        - Key: ManagedBy
+          Value: Infranitum
+
+  InfranitumDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: InfranitumDeployRole
+      Description: >-
+        Assumed by GitHub Actions in {GitHubOrg}/{GitHubRepo} on the
+        {AllowedBranch} branch to deploy Infranitum-managed CloudFormation.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsViaOIDC
+            Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOIDCProvider
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${AllowedBranch}'
+      Policies:
+        - PolicyName: InfranitumCloudFormationOps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudFormationStacksInfranitumOnly
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStacks
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:TagResource
+                  - cloudformation:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/infranitum-*/*'
+              - Sid: CloudFormationGlobalReads
+                Effect: Allow
+                Action:
+                  - cloudformation:ListStackResources
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+
+        - PolicyName: InfranitumResourceWrites
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ─── IAM: account password policy + service / role provisioning ──
+              - Sid: IamAccountPasswordPolicy
+                Effect: Allow
+                Action:
+                  - iam:GetAccountPasswordPolicy
+                  - iam:UpdateAccountPasswordPolicy
+                  - iam:DeleteAccountPasswordPolicy
+                Resource: '*'
+              - Sid: IamInfranitumServiceRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/infranitum-*'
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                      - cloudformation.amazonaws.com
+                      - vpc-flow-logs.amazonaws.com
+                      - config.amazonaws.com
+                      - cloudtrail.amazonaws.com
+
+              # ─── S3: account-level + bucket-level PAB, encryption, log buckets ──
+              - Sid: S3AccountControls
+                Effect: Allow
+                Action:
+                  - s3:PutAccountPublicAccessBlock
+                  - s3:GetAccountPublicAccessBlock
+                Resource: '*'
+              - Sid: S3BucketControls
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketTagging
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketLogging
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::infranitum-*'
+
+              # ─── CloudTrail: multi-Region trail + KMS + log validation ──
+              - Sid: CloudTrailOps
+                Effect: Allow
+                Action:
+                  - cloudtrail:CreateTrail
+                  - cloudtrail:DeleteTrail
+                  - cloudtrail:UpdateTrail
+                  - cloudtrail:StartLogging
+                  - cloudtrail:StopLogging
+                  - cloudtrail:PutEventSelectors
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrail
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:ListTrails
+                  - cloudtrail:AddTags
+                  - cloudtrail:RemoveTags
+                Resource: '*'
+
+              # ─── AWS Config recorder + delivery channel ──
+              - Sid: ConfigService
+                Effect: Allow
+                Action:
+                  - config:PutConfigurationRecorder
+                  - config:DeleteConfigurationRecorder
+                  - config:DescribeConfigurationRecorders
+                  - config:DescribeConfigurationRecorderStatus
+                  - config:StartConfigurationRecorder
+                  - config:StopConfigurationRecorder
+                  - config:PutDeliveryChannel
+                  - config:DeleteDeliveryChannel
+                  - config:DescribeDeliveryChannels
+                Resource: '*'
+
+              # ─── Security Hub / GuardDuty / Inspector / Access Analyzer enable-actions ──
+              - Sid: EnableSecurityHub
+                Effect: Allow
+                Action:
+                  - securityhub:EnableSecurityHub
+                  - securityhub:DisableSecurityHub
+                  - securityhub:DescribeHub
+                  - securityhub:UpdateSecurityHubConfiguration
+                  - securityhub:EnableImportFindingsForProduct
+                  - securityhub:BatchEnableStandards
+                  - securityhub:GetEnabledStandards
+                  - securityhub:TagResource
+                Resource: '*'
+              - Sid: GuardDuty
+                Effect: Allow
+                Action:
+                  - guardduty:CreateDetector
+                  - guardduty:DeleteDetector
+                  - guardduty:UpdateDetector
+                  - guardduty:GetDetector
+                  - guardduty:ListDetectors
+                  - guardduty:TagResource
+                Resource: '*'
+              - Sid: Inspector2
+                Effect: Allow
+                Action:
+                  - inspector2:Enable
+                  - inspector2:Disable
+                  - inspector2:UpdateConfiguration
+                  - inspector2:BatchGetAccountStatus
+                Resource: '*'
+              - Sid: AccessAnalyzer
+                Effect: Allow
+                Action:
+                  - access-analyzer:CreateAnalyzer
+                  - access-analyzer:DeleteAnalyzer
+                  - access-analyzer:GetAnalyzer
+                  - access-analyzer:ListAnalyzers
+                  - access-analyzer:TagResource
+                Resource: '*'
+
+              # ─── KMS: enable rotation on existing customer CMKs ──
+              - Sid: KmsRotation
+                Effect: Allow
+                Action:
+                  - kms:EnableKeyRotation
+                  - kms:DisableKeyRotation
+                  - kms:GetKeyRotationStatus
+                  - kms:DescribeKey
+                  - kms:ListKeys
+                  - kms:TagResource
+                Resource: '*'
+
+              # ─── ELBv2: update HTTPS/TLS listener policies ──
+              - Sid: ELBv2ListenerOps
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeLoadBalancers
+                Resource: '*'
+
+              # ─── RDS: configure backups / deletion protection / snapshot sharing ──
+              - Sid: RdsOps
+                Effect: Allow
+                Action:
+                  - rds:ModifyDBInstance
+                  - rds:ModifyDBCluster
+                  - rds:ModifyDBSnapshotAttribute
+                  - rds:ModifyDBClusterSnapshotAttribute
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBSnapshots
+                  - rds:DescribeDBClusterSnapshots
+                  - rds:AddTagsToResource
+                Resource: '*'
+
+              # ─── EC2: EBS default encryption, IMDS, snapshot attributes, VPC flow logs ──
+              - Sid: Ec2EbsAndImds
+                Effect: Allow
+                Action:
+                  - ec2:EnableEbsEncryptionByDefault
+                  - ec2:DisableEbsEncryptionByDefault
+                  - ec2:GetEbsEncryptionByDefault
+                  - ec2:ModifyInstanceMetadataOptions
+                  - ec2:ModifySnapshotAttribute
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeSnapshotAttribute
+                  - ec2:DescribeInstances
+                Resource: '*'
+              - Sid: VpcFlowLogs
+                Effect: Allow
+                Action:
+                  - ec2:CreateFlowLogs
+                  - ec2:DeleteFlowLogs
+                  - ec2:DescribeFlowLogs
+                Resource: '*'
+              - Sid: CloudWatchLogsForFlowLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DescribeLogGroups
+                  - logs:TagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/infranitum/*'
+
+              # ─── Secrets Manager: configure rotation ──
+              - Sid: SecretsManager
+                Effect: Allow
+                Action:
+                  - secretsmanager:RotateSecret
+                  - secretsmanager:CancelRotateSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecrets
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:TagResource
+                Resource: '*'
+      Tags:
+        - Key: ManagedBy
+          Value: Infranitum
+        - Key: infranitum:role
+          Value: deploy-pipeline
+
+Outputs:
+  DeployRoleArn:
+    Description: >-
+      The role GitHub Actions assumes to deploy Infranitum templates.
+      Paste this into Infranitum → Config → Deploy pipeline → "Deploy role ARN"
+      so the workflow file references the right principal.
+    Value: !GetAtt InfranitumDeployRole.Arn
+    Export:
+      Name: Infranitum-DeployRoleArn
+
+  GitHubTrustExpression:
+    Description: >-
+      The sub-claim the OIDC role trusts, for reference / audit.
+    Value: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${AllowedBranch}'
+
+  OidcProviderArn:
+    Condition: ShouldCreateOidcProvider
+    Description: ARN of the created GitHub Actions OIDC provider.
+    Value: !Ref GitHubOIDCProvider
